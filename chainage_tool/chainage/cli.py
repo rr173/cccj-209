@@ -27,7 +27,11 @@ if __package__ in (None, ""):
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     from chainage import __version__
     from chainage.build import build, validate_only
-    from chainage.errors import ChainageError, PackageValidationError
+    from chainage.errors import (
+        ChainageError,
+        PackageValidationError,
+        SettlementValidationError,
+    )
     from chainage.query import (
         explain_reverse_plan,
         forward_query,
@@ -35,10 +39,15 @@ if __package__ in (None, ""):
         list_registrations,
         reverse_query,
     )
+    from chainage.settlement import run_settlement
 else:
     from . import __version__
     from .build import build, validate_only
-    from .errors import ChainageError, PackageValidationError
+    from .errors import (
+        ChainageError,
+        PackageValidationError,
+        SettlementValidationError,
+    )
     from .query import (
         explain_reverse_plan,
         forward_query,
@@ -46,6 +55,7 @@ else:
         list_registrations,
         reverse_query,
     )
+    from .settlement import run_settlement
 
 _STATUS_CN = {
     "NO_SOURCE": "无源位置",
@@ -118,6 +128,102 @@ def _render_reverse(obj: dict) -> None:
                   f"目标: {ev}")
 
 
+def _render_list(rows: List[dict], list_mode: str) -> None:
+    label = ("可直接派人补巡的路段（确定缺巡）" if list_mode == "dispatch"
+             else "先核对行车记录、暂不派工的路段（待核实）")
+    print(label + ":")
+    if not rows:
+        print("  无")
+    for d in rows:
+        print(f"  {d['obligation_id']} 轴 {d['axis_id']} 车道 {d['lane']} "
+              f"[{d['lo']},{d['hi']}]")
+
+
+def _render_settle(obj: dict, list_mode: str) -> None:
+    ledger = obj["ledger"]
+    print(f"结算截止点 {obj['cutoff']}，换算库 {obj['db_path']}")
+    if list_mode == "dispatch":
+        print("可直接派人补巡的路段（确定缺巡）:")
+        if not ledger["dispatch"]:
+            print("  无")
+        for d in ledger["dispatch"]:
+            print(f"  {d['obligation_id']} 轴 {d['axis_id']} 车道 {d['lane']} "
+                  f"[{d['lo']},{d['hi']}]")
+        return
+    if list_mode == "review":
+        print("先核对行车记录、暂不派工的路段（待核实）:")
+        if not ledger["review"]:
+            print("  无")
+        for d in ledger["review"]:
+            print(f"  {d['obligation_id']} 轴 {d['axis_id']} 车道 {d['lane']} "
+                  f"[{d['lo']},{d['hi']}]")
+        return
+    for ob in ledger["obligations"]:
+        print(f"义务 {ob['obligation_id']} 轴 {ob['axis_id']} 车道 {ob['lane']} "
+              f"物理[{ob['start']},{ob['end']}] 状态 {ob['state_cn']}"
+              f"（{ob['state']}）")
+        for s in ob["segments"]:
+            thr = " ".join(
+                f"{t['label']}:{t['lower']}/{t['upper']}(需{t['min_crews']})"
+                for t in s["thresholds"])
+            print(f"  [{s['lo']},{s['hi']}] {s['state_cn']} {thr}")
+    print("缺巡清单:")
+    for d in ledger["dispatch"]:
+        print(f"  {d['obligation_id']} 轴 {d['axis_id']} 车道 {d['lane']} "
+              f"[{d['lo']},{d['hi']}]")
+    if not ledger["dispatch"]:
+        print("  无")
+    print("待核实清单:")
+    for d in ledger["review"]:
+        print(f"  {d['obligation_id']} 轴 {d['axis_id']} 车道 {d['lane']} "
+              f"[{d['lo']},{d['hi']}]")
+    if not ledger["review"]:
+        print("  无")
+
+
+def _render_diff(obj: dict) -> None:
+    print(f"截止点比较: {obj['cutoff_before']} -> {obj['cutoff']}"
+          f"（换算库 {obj['db_path']}）")
+    for ob in obj["comparison"]["obligations"]:
+        print(f"义务 {ob['obligation_id']} 轴 {ob['axis_id']} 车道 {ob['lane']} "
+              f"[{ob['start']},{ob['end']}]: {ob['change_count']} 处状态改变")
+        for c in ob["changes"]:
+            b = " ".join(f"{t['label']}:{t['lower']}/{t['upper']}"
+                         for t in c["before_thresholds"])
+            a = " ".join(f"{t['label']}:{t['lower']}/{t['upper']}"
+                         for t in c["after_thresholds"])
+            print(f"  [{c['lo']},{c['hi']}] {c['before_state']} -> "
+                  f"{c['after_state']}  人数 {b} => {a}")
+
+
+def _render_explain(obj: dict) -> None:
+    print(f"义务 {obj['obligation_id']} 轴 {obj['axis_id']} 物理位置 {obj['x']}: "
+          f"{obj['state_cn']}（{obj['state']}）")
+    for t in obj["thresholds"]:
+        print(f" 门槛 {t['label']} [{t['window_start']},{t['window_end']}) "
+              f"需 {t['min_crews']} 班组，下界 {t['lower']} / 上界 {t['upper']}")
+        print(f"   确定班组: {', '.join(t['definite_crews']) or '无'}")
+        print(f"   仅可能班组: {', '.join(t['possible_only_crews']) or '无'}")
+    for trip in obj["trips"]:
+        print(f" 趟次 {trip['trip_id']} 班组 {trip['crew']} "
+              f"入簿版本 ingest={trip['ingest_time']} "
+              f"实测={trip['survey_time']} "
+              f"{'确定' if trip['definite'] else ('可能' if trip['possible'] else '未命中')}")
+        for r in trip["routes"]:
+            print(f"   路线版本 #{r['route_index']} "
+                  f"{'命中' if r['covers_point'] else '未命中'}")
+            for f in r["fragments"]:
+                print(f"     片段#{f['fragment_index']} 登记 {f['reg_id']} "
+                      f"源[{f['n_from']},{f['n_to']}] -> 物理[{f['x_lo']},{f['x_hi']}] "
+                      f"标定行 {f['calib_row_id']}(第 {f['calib_source_line']} 行)"
+                      f"{' 覆盖该点' if f['covers_point'] else ''}")
+
+
+def _settle_call(args) -> dict:
+    return run_settlement(args.db_path, args.obligations, args.trip_log,
+                          cutoff=args.cutoff)
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="chainage",
@@ -160,7 +266,40 @@ def _build_parser() -> argparse.ArgumentParser:
     p_plan.add_argument("target_system")
     p_plan.add_argument("--n", type=int, required=True)
 
-    for p in (p_val, p_build, p_fwd, p_rev, p_regs, p_cal, p_plan):
+    # ---------------- 巡检履约结算 ----------------
+    p_settle = sub.add_parser(
+        "settle", help="单截止点：按义务出达标/缺巡/待核实台账与两张清单")
+    p_settle.add_argument("db_path")
+    p_settle.add_argument("obligations")
+    p_settle.add_argument("trip_log")
+    p_settle.add_argument("--cutoff", type=int, required=True,
+                          help="结算截止点（UTC 整数秒，含）")
+    p_settle.add_argument("--list", choices=("ledger", "dispatch", "review"),
+                          default="ledger",
+                          help="输出整份台账，或直接取缺巡/待核实清单")
+
+    p_diff = sub.add_parser(
+        "settle-diff", help="两个截止点：列出状态改变的区段与前后人数")
+    p_diff.add_argument("db_path")
+    p_diff.add_argument("obligations")
+    p_diff.add_argument("trip_log")
+    p_diff.add_argument("--before", type=int, required=True,
+                        help="较早截止点（含）")
+    p_diff.add_argument("--after", type=int, required=True,
+                        help="较晚截止点（含）")
+
+    p_expl = sub.add_parser(
+        "settle-explain", help="单点取证：某义务在某物理位置的逐门槛解释")
+    p_expl.add_argument("db_path")
+    p_expl.add_argument("obligations")
+    p_expl.add_argument("trip_log")
+    p_expl.add_argument("--cutoff", type=int, required=True)
+    p_expl.add_argument("--obligation", required=True, dest="obligation_id")
+    p_expl.add_argument("--x", type=int, required=True,
+                        help="义务区间内的物理刻度")
+
+    for p in (p_val, p_build, p_fwd, p_rev, p_regs, p_cal, p_plan,
+              p_settle, p_diff, p_expl):
         p.add_argument("--text", action="store_true", help="紧凑文本输出（默认 JSON）")
     return parser
 
@@ -216,6 +355,38 @@ def main(argv: List[str] = None) -> int:
             return _emit(plan, args.text,
                          lambda rows: [print(r["detail"]) for r in rows])
 
+        if args.cmd == "settle":
+            obj = _settle_call(args)
+            if args.list != "ledger":
+                # 清单可直接取用：只输出该张清单（缺巡或待核实）
+                payload = obj["ledger"][args.list]
+                return _emit(payload, args.text,
+                             lambda rows: _render_list(rows, args.list))
+            return _emit(obj, args.text,
+                         lambda o: _render_settle(o, args.list))
+
+        if args.cmd == "settle-diff":
+            obj = run_settlement(args.db_path, args.obligations,
+                                 args.trip_log, cutoff=args.after,
+                                 cutoff_before=args.before)
+            return _emit(obj, args.text, _render_diff)
+
+        if args.cmd == "settle-explain":
+            obj = run_settlement(
+                args.db_path, args.obligations, args.trip_log,
+                cutoff=args.cutoff,
+                explain=(args.obligation_id, args.x))
+            return _emit(obj, args.text,
+                         lambda o: _render_explain(o["explain"]))
+
+    except SettlementValidationError as exc:
+        payload = {
+            "error": "SETTLEMENT_VALIDATION_FAILED",
+            "issues": [i.to_dict() for i in exc.issues],
+        }
+        json.dump(payload, sys.stdout, ensure_ascii=False, indent=2)
+        sys.stdout.write("\n")
+        return 2
     except PackageValidationError as exc:
         payload = {
             "error": "PACKAGE_VALIDATION_FAILED",

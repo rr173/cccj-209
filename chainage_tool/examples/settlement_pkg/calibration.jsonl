@@ -1,0 +1,2 @@
+{"row_id": "S1", "system": "OLD", "axis_id": "A1", "segment": "S", "lo": 0, "hi": 40, "label_lo": 1000, "direction": 1}
+{"row_id": "G1", "system": "NEW", "axis_id": "A1", "segment": "G", "lo": 0, "hi": 40, "label_lo": 2000, "direction": 1}

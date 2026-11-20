@@ -66,3 +66,71 @@ class DatabaseError(ChainageError):
 
 class BuildInProgressError(ChainageError):
     """旧库仍处于未完成的构建状态（正常流程下临时库会被清理）。"""
+
+
+class SettlementIssue:
+    """巡检履约结算的一条可定位问题。
+
+    与交接包校验不同，巡检簿的问题必须能直接指回 **趟次 / 入簿时刻 /
+    片段**，班组才能把更正记录改对；义务/结构问题则带文件物理行号。
+    """
+
+    __slots__ = ("location", "code", "message", "trip_id", "ingest_time",
+                 "route_index", "fragment_index", "obligation_id")
+
+    def __init__(self, location: str, code: str, message: str,
+                 trip_id: Optional[str] = None,
+                 ingest_time: Optional[int] = None,
+                 route_index: Optional[int] = None,
+                 fragment_index: Optional[int] = None,
+                 obligation_id: Optional[str] = None) -> None:
+        self.location = location
+        self.code = code
+        self.message = message
+        self.trip_id = trip_id
+        self.ingest_time = ingest_time
+        self.route_index = route_index
+        self.fragment_index = fragment_index
+        self.obligation_id = obligation_id
+
+    def __str__(self) -> str:
+        parts = [self.location, self.code]
+        if self.trip_id is not None:
+            parts.append(f"trip={self.trip_id}")
+        if self.ingest_time is not None:
+            parts.append(f"ingest={self.ingest_time}")
+        if self.route_index is not None:
+            parts.append(f"route={self.route_index}")
+        if self.fragment_index is not None:
+            parts.append(f"fragment={self.fragment_index}")
+        return f"{' '.join(parts)}: {self.message}"
+
+    def to_dict(self) -> dict:
+        out = {
+            "location": self.location,
+            "code": self.code,
+            "message": self.message,
+        }
+        if self.trip_id is not None:
+            out["trip_id"] = self.trip_id
+        if self.ingest_time is not None:
+            out["ingest_time"] = self.ingest_time
+        if self.route_index is not None:
+            out["route_index"] = self.route_index
+        if self.fragment_index is not None:
+            out["fragment_index"] = self.fragment_index
+        if self.obligation_id is not None:
+            out["obligation_id"] = self.obligation_id
+        return out
+
+
+class SettlementValidationError(ChainageError):
+    """巡检义务表或巡检簿校验失败：聚合全部问题，绝不留下部分清单。"""
+
+    def __init__(self, issues: List[SettlementIssue]):
+        self.issues: List[SettlementIssue] = list(issues)
+        summary = "; ".join(str(i) for i in self.issues[:10])
+        if len(self.issues) > 10:
+            summary += f"; ...（共 {len(self.issues)} 条）"
+        super().__init__(f"巡检履约结算校验失败，{len(self.issues)} 条问题: "
+                         f"{summary}")

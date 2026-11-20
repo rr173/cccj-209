@@ -1,0 +1,20 @@
+[
+  {
+    "obligation_id": "O1",
+    "axis_id": "A1",
+    "lane": "L1",
+    "start": 10,
+    "end": 14,
+    "window_start": 1795190400,
+    "window_end": 1795219200,
+    "min_crews": 2,
+    "sub_windows": [
+      {
+        "start": 1795190400,
+        "end": 1795204800,
+        "min_crews": 1,
+        "label": "morning"
+      }
+    ]
+  }
+]

@@ -1,0 +1,15 @@
+{
+  "version": "settlement-demo-2026-11-20",
+  "axes": [
+    {
+      "axis_id": "A1",
+      "length": 40
+    }
+  ],
+  "files": {
+    "manifest": "manifest.json",
+    "calibration": "calibration.jsonl",
+    "registration": "registration.jsonl"
+  },
+  "notes": "结算示例：OLD/S 段编号 1000..1040 对应物理 0..40（正方向）"
+}
