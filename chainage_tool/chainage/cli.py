@@ -9,6 +9,7 @@
 - regs      列出库内登记
 - calib     按稳定行标识取标定行（复核拒绝依据）
 - plan      展示反查的 SQLite 查询计划（验收用，证明走索引）
+- defect-*  病害归并工作区：建区、批次录入/裁定、全量/增量、候选与隔离复核
 
 默认输出 UTF-8 JSON（ensure_ascii=False）；加 --text 给班组看紧凑表格。
 """
@@ -29,6 +30,7 @@ if __package__ in (None, ""):
     from chainage.build import build, validate_only
     from chainage.errors import (
         ChainageError,
+        DefectValidationError,
         PackageValidationError,
         SettlementValidationError,
     )
@@ -40,11 +42,13 @@ if __package__ in (None, ""):
         reverse_query,
     )
     from chainage.settlement import run_settlement
+    from chainage import defects as defect_ws
 else:
     from . import __version__
     from .build import build, validate_only
     from .errors import (
         ChainageError,
+        DefectValidationError,
         PackageValidationError,
         SettlementValidationError,
     )
@@ -56,6 +60,7 @@ else:
         reverse_query,
     )
     from .settlement import run_settlement
+    from . import defects as defect_ws
 
 _STATUS_CN = {
     "NO_SOURCE": "无源位置",
@@ -219,6 +224,165 @@ def _render_explain(obj: dict) -> None:
                       f"{' 覆盖该点' if f['covers_point'] else ''}")
 
 
+def _render_defect_init(obj: dict) -> None:
+    print(f"病害工作区已建立: {obj['workspace_dir']}")
+    print(f"  workspace_id: {obj['workspace_id']}")
+    print(f"  绑定换算库指纹: {obj['chainage_fingerprint']}")
+    print(f"  阈值: 空间 {obj['spatial_threshold']} 刻度，"
+          f"时间 {obj['time_threshold']} 秒（端点算命中）")
+    print(f"  当前修订: {obj['revision']}")
+
+
+def _render_defect_batch(obj: dict) -> None:
+    r = obj["receipt"]
+    prefix = "重试回放原收据" if obj.get("replayed") else "批已提交"
+    print(f"{prefix}: 批号 {r['batch_no']}，基准修订 {r['base_revision']} "
+          f"-> 修订 {r['revision']}")
+    c = r["counts"]
+    print(f"  录入 {c['reports_entered']}，撤下 {c['reports_voided']}，"
+          f"裁定（同一/不同/撤去）{c['adjudications_same']}/"
+          f"{c['adjudications_different']}/{c['adjudications_cleared']}")
+    print(f"  组 {c['groups_total']}（隔离 {c['groups_isolated']}），"
+          f"成员 {c['members_total']}")
+    ch = r["changes"]
+    print(f"  增量: 共 {ch['total']} 行（组 {ch['defect_group']}，"
+          f"成员 {ch['defect_member']}）")
+
+
+def _render_defect_full(obj: dict) -> None:
+    print(f"全量修订 {obj['revision']}，工作区 {obj['workspace_id']}")
+    print("病害组表:")
+    for g in obj["defect_groups"]:
+        print(f"  {g['group_key']}  隔离={'是' if g['isolated'] else '否'}  "
+              f"成员 {g['member_count']}  发现 "
+              f"[{g['first_found']},{g['last_found']}]")
+    print("成员表:")
+    for m in obj["defect_members"]:
+        loc = m["location"]
+        where = (f"轴 {loc['axis_id']} x={loc['lo']}"
+                 if loc["status"] == "localizable"
+                 else loc["status"])
+        print(f"  {m['source']}/{m['source_ref']} -> {m['group_key']}  "
+              f"{m['category']} {m['lane']} t={m['found_at']} {where}")
+
+
+def _render_defect_changes(obj: dict) -> None:
+    print(f"增量: 修订 {obj['from_revision']} -> {obj['revision']}")
+    if not obj["batches"]:
+        print("  无新批")
+        return
+    for b in obj["batches"]:
+        if not b["changes"]:
+            print(f"  修订 {b['revision']}（批 {b['batch_no']}）: 无表变化，"
+                  f"修订已确认")
+            continue
+        print(f"  修订 {b['revision']}（批 {b['batch_no']}）:")
+        for c in b["changes"]:
+            print(f"    {c['op']} {c['table']} {json.dumps(c['key'], ensure_ascii=False)}")
+
+
+def _render_defect_groups(obj: dict) -> None:
+    print(f"修订 {obj['revision']}，病害组 {len(obj['groups'])} 个")
+    for g in obj["groups"]:
+        print(f"  {g['group_key']}  隔离={'是' if g['isolated'] else '否'}  "
+              f"成员 {g['member_count']}  "
+              f"发现 [{g['first_found']},{g['last_found']}]")
+
+
+def _render_defect_group(obj: dict) -> None:
+    g = obj["group"]
+    print(f"修订 {obj['revision']}，病害组 {g['group_key']}，"
+          f"隔离={'是' if g['isolated'] else '否'}，成员 {g['member_count']}")
+    for m in obj["members"]:
+        loc = m["location"]
+        where = (f"轴 {loc['axis_id']} x={loc['lo']}"
+                 if loc["status"] == "localizable" else loc["status"])
+        print(f"  {m['source']}/{m['source_ref']} 类别 {m['category']} "
+              f"车道 {m['lane']} 发现 {m['found_at']} {where} "
+              f"登记 {m['registration']['reg_id']}/"
+              f"{m['registration']['reg_n']}")
+    ev = obj.get("isolation_evidence")
+    if ev and ev.get("isolated"):
+        print("隔离证据:")
+        for e in ev["different_edges"]:
+            a, b = e["between"]
+            path = " -> ".join(f"{p[0]}/{p[1]}" for p in e["same_path"])
+            print(f"  不同 {a[0]}/{a[1]} vs {b[0]}/{b[1]}；"
+                  f"同一路径: {path}")
+
+
+def _render_defect_evidence(obj: dict) -> None:
+    if not obj.get("isolated"):
+        print(f"病害组 {obj['group_key']} 未被隔离")
+        return
+    print(f"病害组 {obj['group_key']} 被隔离，导致隔离的不同裁定:")
+    for e in obj["different_edges"]:
+        a, b = e["between"]
+        path = " -> ".join(f"{p[0]}/{p[1]}" for p in e["same_path"])
+        print(f"  不同 {a[0]}/{a[1]} vs {b[0]}/{b[1]}")
+        print(f"    同一路径: {path}")
+
+
+def _render_defect_candidates(obj: dict) -> None:
+    s = obj["start"]
+    print(f"修订 {obj['revision']}，起点 {s['source']}/{s['source_ref']} "
+          f"（{s['category']} {s['lane']} t={s['found_at']}）")
+    if not obj["eligible"]:
+        print("  起点没有唯一物理位置，不参加按位置找候选")
+        return
+    print(f"  阈值: 空间 {obj['thresholds']['spatial']}，"
+          f"时间 {obj['thresholds']['time']}")
+    if not obj["candidates"]:
+        print("  无未裁定的跨来源候选")
+    for c in obj["candidates"]:
+        o = c["other"]
+        loc = o["location"]
+        print(f"  候选 {o['source']}/{o['source_ref']} "
+              f"轴 {loc['axis_id']} x={loc['lo']} t={o['found_at']} "
+              f"δx={c['spatial_delta']} δt={c['time_delta']} "
+              f"登记 {o['registration']['reg_id']}/{o['registration']['reg_n']}")
+    if "scan" in obj:
+        sc = obj["scan"]
+        print(f"  扫描量: 同桶 {sc['bucket_rows']} 行，"
+              f"空间+时间窗内 {sc['space_time_preselected']} 行，"
+              f"逐对判断 {sc['pairs_examined']}，命中 {sc['candidates']}")
+
+
+def _render_defect_reports(obj: dict) -> None:
+    print(f"修订 {obj['revision']}，报件 {len(obj['reports'])} 条")
+    for r in obj["reports"]:
+        loc = r["location"]
+        where = (f"轴 {loc['axis_id']} x={loc['lo']}"
+                 if loc["status"] == "localizable" else loc["status"])
+        print(f"  {'[在册]' if r['present'] else '[已撤]'} "
+              f"{r['source']}/{r['source_ref']} {r['category']} {r['lane']} "
+              f"t={r['found_at']} {where} 登记 {r['registration']['reg_id']}/"
+              f"{r['registration']['reg_n']}")
+
+
+def _render_defect_adjs(obj: dict) -> None:
+    print(f"修订 {obj['revision']}，裁定 {len(obj['adjudications'])} 条")
+    for a in obj["adjudications"]:
+        print(f"  {'生效' if a['effective'] else '已撤'} {a['kind']} "
+              f"{a['a'][0]}/{a['a'][1]} - {a['b'][0]}/{a['b'][1]} "
+              f"(修订 {a['since_revision']} 批 {a['batch_no']})")
+
+
+def _render_defect_scope(obj: dict) -> None:
+    print(f"批 {obj['batch_no']} -> 修订 {obj['revision']}")
+    print(f"  触及组 {len(obj['groups'])} 个:")
+    for gk in obj["groups"]:
+        print(f"    {gk}")
+    print(f"  触及成员行 {len(obj['members'])} 条")
+    b = obj.get("batch_counts") or {}
+    print(f"  提交时规模: 组 {b.get('groups_total')}，"
+          f"成员 {b.get('members_total')}，"
+          f"隔离组 {b.get('groups_isolated')}")
+    t = obj["current_totals"]
+    print(f"  当前工作区总量: 组 {t['groups']}，成员 {t['members']}，"
+          f"在册报件 {t['reports_present']}")
+
+
 def _settle_call(args) -> dict:
     return run_settlement(args.db_path, args.obligations, args.trip_log,
                           cutoff=args.cutoff)
@@ -298,8 +462,73 @@ def _build_parser() -> argparse.ArgumentParser:
     p_expl.add_argument("--x", type=int, required=True,
                         help="义务区间内的物理刻度")
 
+    # ---------------- 病害报件归并工作区 ----------------
+    p_dinit = sub.add_parser(
+        "defect-init", help="建病害归并工作区并绑定一份 ready 换算库")
+    p_dinit.add_argument("workspace_dir")
+    p_dinit.add_argument("db_path", help="ready 换算库")
+    p_dinit.add_argument("--spatial-threshold", type=int, required=True,
+                         help="物理刻度差阈值（闭区间，端点算命中）")
+    p_dinit.add_argument("--time-threshold", type=int, required=True,
+                         help="发现时间差阈值（秒，闭区间，端点算命中）")
+
+    p_dbatch = sub.add_parser(
+        "defect-batch", help="应用一批病害更正（录入/撤下/裁定）")
+    p_dbatch.add_argument("workspace_dir")
+    p_dbatch.add_argument("batch_file")
+
+    p_dfull = sub.add_parser(
+        "defect-full", help="全量取病害组表 + 成员表及所属修订号")
+    p_dfull.add_argument("workspace_dir")
+
+    p_dinc = sub.add_parser(
+        "defect-changes", help="从给定修订之后按批取表级增量")
+    p_dinc.add_argument("workspace_dir")
+    p_dinc.add_argument("--since", type=int, required=True)
+
+    p_dgroups = sub.add_parser("defect-groups", help="列出病害组")
+    p_dgroups.add_argument("workspace_dir")
+    p_dgroups.add_argument("--isolated", action="store_true",
+                           help="只列被隔离的组")
+
+    p_dgroup = sub.add_parser("defect-group", help="查看某组全部成员与隔离证据")
+    p_dgroup.add_argument("workspace_dir")
+    p_dgroup.add_argument("group_key")
+
+    p_devid = sub.add_parser(
+        "defect-evidence", help="列出导致某隔离组隔离的不同裁定与同一路径")
+    p_devid.add_argument("workspace_dir")
+    p_devid.add_argument("group_key")
+
+    p_dcand = sub.add_parser(
+        "defect-candidates", help="从一条在册报件列未裁定的跨来源候选")
+    p_dcand.add_argument("workspace_dir")
+    p_dcand.add_argument("source")
+    p_dcand.add_argument("source_ref")
+    p_dcand.add_argument("--spatial-threshold", type=int)
+    p_dcand.add_argument("--time-threshold", type=int)
+    p_dcand.add_argument("--limit", type=int)
+    p_dcand.add_argument("--explain-scan", action="store_true",
+                         help="附加预筛读取量与逐对判断数")
+
+    p_dreps = sub.add_parser("defect-reports", help="列出报件（默认仅在册）")
+    p_dreps.add_argument("workspace_dir")
+    p_dreps.add_argument("--all", action="store_true", help="含已撤下")
+    p_dreps.add_argument("--source")
+
+    p_dadjs = sub.add_parser("defect-adjudications", help="列出裁定")
+    p_dadjs.add_argument("workspace_dir")
+    p_dadjs.add_argument("--all", action="store_true", help="含已撤去")
+
+    p_dscope = sub.add_parser(
+        "defect-scope", help="某批实际触及的组/成员（局部重算范围）")
+    p_dscope.add_argument("workspace_dir")
+    p_dscope.add_argument("--batch")
+
     for p in (p_val, p_build, p_fwd, p_rev, p_regs, p_cal, p_plan,
-              p_settle, p_diff, p_expl):
+              p_settle, p_diff, p_expl, p_dinit, p_dbatch, p_dfull, p_dinc,
+              p_dgroups, p_dgroup, p_devid, p_dcand, p_dreps, p_dadjs,
+              p_dscope):
         p.add_argument("--text", action="store_true", help="紧凑文本输出（默认 JSON）")
     return parser
 
@@ -379,6 +608,69 @@ def main(argv: List[str] = None) -> int:
             return _emit(obj, args.text,
                          lambda o: _render_explain(o["explain"]))
 
+        if args.cmd == "defect-init":
+            obj = defect_ws.create_workspace(
+                args.workspace_dir, args.db_path, args.spatial_threshold,
+                args.time_threshold)
+            obj["workspace_dir"] = os.path.abspath(args.workspace_dir)
+            return _emit(obj, args.text, _render_defect_init)
+
+        if args.cmd == "defect-batch":
+            obj = defect_ws.apply_batch(args.workspace_dir, args.batch_file)
+            return _emit(obj, args.text, _render_defect_batch)
+
+        if args.cmd == "defect-full":
+            obj = defect_ws.fetch_full(args.workspace_dir)
+            return _emit(obj, args.text, _render_defect_full)
+
+        if args.cmd == "defect-changes":
+            obj = defect_ws.fetch_changes(args.workspace_dir, args.since)
+            return _emit(obj, args.text, _render_defect_changes)
+
+        if args.cmd == "defect-groups":
+            obj = defect_ws.list_groups(args.workspace_dir, args.isolated)
+            return _emit(obj, args.text, _render_defect_groups)
+
+        if args.cmd == "defect-group":
+            obj = defect_ws.group_detail(args.workspace_dir, args.group_key)
+            return _emit(obj, args.text, _render_defect_group)
+
+        if args.cmd == "defect-evidence":
+            obj = defect_ws.isolation_evidence(args.workspace_dir,
+                                               args.group_key)
+            return _emit(obj, args.text, _render_defect_evidence)
+
+        if args.cmd == "defect-candidates":
+            obj = defect_ws.candidate_pairs(
+                args.workspace_dir, args.source, args.source_ref,
+                spatial_threshold=args.spatial_threshold,
+                time_threshold=args.time_threshold, limit=args.limit,
+                explain_scan=args.explain_scan)
+            return _emit(obj, args.text, _render_defect_candidates)
+
+        if args.cmd == "defect-reports":
+            obj = defect_ws.list_reports(
+                args.workspace_dir, present_only=not args.all,
+                source=args.source)
+            return _emit(obj, args.text, _render_defect_reports)
+
+        if args.cmd == "defect-adjudications":
+            obj = defect_ws.list_adjudications(
+                args.workspace_dir, effective_only=not args.all)
+            return _emit(obj, args.text, _render_defect_adjs)
+
+        if args.cmd == "defect-scope":
+            obj = defect_ws.last_batch_scope(args.workspace_dir, args.batch)
+            return _emit(obj, args.text, _render_defect_scope)
+
+    except DefectValidationError as exc:
+        payload = {
+            "error": "DEFECT_VALIDATION_FAILED",
+            "issues": [i.to_dict() for i in exc.issues],
+        }
+        json.dump(payload, sys.stdout, ensure_ascii=False, indent=2)
+        sys.stdout.write("\n")
+        return 2
     except SettlementValidationError as exc:
         payload = {
             "error": "SETTLEMENT_VALIDATION_FAILED",

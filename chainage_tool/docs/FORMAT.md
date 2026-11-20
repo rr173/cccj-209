@@ -204,3 +204,90 @@
 
 结构错误、重复入簿键、引用不可解释都会聚合为 `SETTLEMENT_VALIDATION_FAILED`
 （退出码 2），不输出任何部分清单；义务 ID 不存在等查询错误退出码 1。
+
+## 10. 病害归并工作区
+
+病害归并工作区是既有 ready 换算库之上的独立工作区（`chainage/defects.py`，
+CLI `defect-*`），不改变第 1–9 节的交接包、库与巡检结算格式。工作区目录：
+
+```
+<workspace_dir>/
+├── workspace.db     报件、裁定、病害组/成员表、批收据、增量（SQLite）
+└── chainage.db      建区时复制的 ready 换算库（之后不读外部库）
+```
+
+### 10.1 工作区元数据与绑定
+
+`workspace.db` 的 `wmeta` 保存：`format`、`workspace_schema`、
+`workspace_id`、`chainage_fingerprint`、`spatial_threshold`、
+`time_threshold`、`revision`。`chainage_fingerprint` 由轴、标定行、登记
+与交接版本计算；打开工作区时重算并与副本比对，被替换即拒绝。批文件必须
+声明同一 `workspace_id`。
+
+阈值在建区时固定：空间阈值是物理刻度差的**闭区间**上限，时间阈值是
+实际发现时间差（秒）的**闭区间**上限，端点算命中。候选查询可临时覆盖
+阈值，但不改写工作区阈值。
+
+### 10.2 报件定位
+
+报件用 `(reg_id, reg_n)` 复用第 8 节正查，在查询点合并该登记的全部分段
+位置：
+
+| 位置数 | `location_status` | 可找候选 |
+|---|---|---|
+| 1 | `localizable` | 是（`RESOLVED` 与 `NO_TARGET` 都算） |
+| 0 | `no_source` | 否 |
+| ≥2 | `multiple_source` | 否 |
+
+登记不存在（`UNKNOWN_REGISTRATION`）与编号超出登记范围
+（`N_OUT_OF_REGISTRATION`）是输入错误，整批拒绝；无位置/多位置是业务
+状态，照常入仓、照常可人工裁定。
+
+### 10.3 批文件（JSON 对象）
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `format` | string | 固定 `chainage-defect-batch` |
+| `batch_no` | string | 批号，全局唯一；重试原基准修订 + 相同操作内容只回放收据 |
+| `based_on_workspace` | string | 工作区 `workspace_id` |
+| `based_on_revision` | int | 基准修订，必须等于当前修订（过期/未知拒绝） |
+| `reports` | array | 录入或整条更正；每项含 `source`、`source_ref`、`category`、`lane`、`found_at`、`reg_id`、`reg_n` |
+| `void` | array | 撤下 `{source, source_ref}` |
+| `adjudications` | array | `{"a": {source, source_ref}, "b": {...}, "decision": "same" \| "different" \| "clear"}` |
+
+裁定两端无序，也可用平铺字段 `a_source/a_ref`、`b_source/b_ref`。同一
+报件键或同一报件对在一批内只能出现一次；同一键不能既录入又撤下；裁定
+只能引用仓内已知报件（含本批新录入和此前撤下的报件）。整批在一个事务
+里生效，行序不影响结果。
+
+### 10.4 病害组与成员表
+
+- 组 = 当前在册报件沿生效「同一」裁定的连通分量（单件也算一组）；
+- 组内有任意生效「不同」裁定 -> `isolated = 1`，不可下发；
+- 组键 = 组内按 `(source, source_ref)` 逐项 Unicode 码点序最小的报件键
+  的规范 JSON（例 `["巡查","A"]`），不是流水号；
+- `defect_group` 行：`group_key`、`isolated`、`member_count`、
+  `first_found`、`last_found`；
+- `defect_member` 行：`source`、`source_ref`、`group_key`、类别、车道、
+  发现时间、登记原引用、定位状态/轴/刻度、完整证据；
+- 撤下报件不删除其裁定；裁定只有两端都在册时才参与分组；重新录入同键
+  后旧裁定自动恢复生效。
+
+### 10.5 修订与增量
+
+- 空表修订 0，每批成功后 +1；
+- 全量（`defect-full`）在同一读事务里返回 `revision` 与两张表的全部行；
+- 增量（`defect-changes --since N`）按批返回修订 N 之后的 `change` 行：
+  `table` 为 `defect_group` 或 `defect_member`，`key` 为组键字符串或
+  `[source, source_ref]`，`op` 为 `+`/`-`/`~`，带 `before`/`after`；
+- 增量的 `before`/`after` 与全量的行形状完全一致，可逐行替换；
+- 未变行不发；无表变化的批返回空 `changes`，确认该修订号已处理；
+- 批内临时拆组/合组不进入增量，只比较批前表与批后表。
+
+### 10.6 局部重算范围
+
+每批只读取并重算本批涉及的报件所在组（含被连接、拆开、改变裁定的组
+以及新录入报件可能接回的历史组），其余组整行沿用。`defect-scope`
+输出该批实际触及的组键与成员键。实现不预存全体两两可达关系，也不预
+生成候选对；候选检索只走 `pair_bucket(category, lane, axis_id,
+loc_lo, loc_hi)` 及时间索引，并按分桶、空间窗口、时间窗口预筛。

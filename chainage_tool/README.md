@@ -31,13 +31,17 @@ chainage/            产品代码
   intervals.py                         整数闭区间集合运算
   settlement_input.py                  义务表/巡检簿解析、校验、暂存
   settlement.py                        巡检履约结算（可见版本、片段定位、分界扫描）
+  defects.py                           病害报件归并工作区（批、组、候选、增量）
   cli.py                               命令行入口
 tests/               验收测试 + 独立逐刻度参考程序
   reference_oracle.py                  桩号换算的逐刻度参考程序
   settlement_oracle.py                 巡检结算的独立逐刻度参考程序
   settlement_fixture.py                结算测试夹具
+  test_defects.py                      病害归并验收测试
+  defect_oracle.py                     病害归并的独立逐批重建参考程序
 scripts/             规模验收与示例生成
 docs/FORMAT.md       交接包、库格式与结算输入/输出说明
+docs/DEFECTS.md      病害归并工作区：批格式、候选、组、修订与增量
 examples/demo_pkg/   文档化示例交接包
 examples/settlement_pkg/ , examples/settlement/
                      文档化结算示例（义务表 + 巡检簿）
@@ -141,6 +145,68 @@ python3 -m chainage settle-explain data/settlement.db \
   无法解释）聚合并抛错，**不输出任何部分清单**。
 
 
+## 病害归并工作区（离线）
+
+在既有 ready 换算库之上，把来源不同、可能重复的**病害报件**按审核员的
+「同一 / 不同」裁定归并成可下发的**病害组**，并以带批号的批文件维护一张
+可增量交付的病害主数据表。它不做巡检结算、不做工单分派、也不自动判同。
+
+```bash
+# 0) 建工作区：绑定一份 ready 换算库的拷贝与空间/时间阈值
+python3 -m chainage defect-init data/defects data/demo.db \
+    --spatial-threshold 3 --time-threshold 600
+
+# 1) 提交一批：录入/更正、撤下、裁定（同一/不同/撤去）
+python3 -m chainage defect-batch data/defects batch-01.json --text
+
+# 2) 审核：报件、裁定、候选、组、隔离证据
+python3 -m chainage defect-reports data/defects --text
+python3 -m chainage defect-candidates data/defects 巡查 P-001 \
+    --explain-scan --text
+python3 -m chainage defect-groups data/defects [--isolated] --text
+python3 -m chainage defect-group data/defects '["巡查","P-001"]' --text
+python3 -m chainage defect-evidence data/defects '["巡查","P-001"]' --text
+
+# 3) 工单侧接表：全量（两张表 + 修订号）或按批增量
+python3 -m chainage defect-full data/defects
+python3 -m chainage defect-changes data/defects --since 2
+
+# 4) 某批实际触及的组/成员（局部重算范围）
+python3 -m chainage defect-scope data/defects --batch demo-02 --text
+```
+
+要点（细节与格式见 `docs/DEFECTS.md`）：
+
+- **工作区绑定**：建区时复制 ready 换算库并记指纹；之后替换外部库文件
+  不会改写已入仓位置，批文件必须声明同一 `workspace_id`，不能混用两份标定；
+- **定位**：沿用正查语义，恰好一个物理位置就可找候选（不要求有目标标牌）；
+  `no_source` / `multiple_source` 仍可入仓和人工裁定，只是不参与按位置找
+  候选；登记不存在、编号越界是输入错误；
+- **候选**：跨来源、同类别、同车道、同轴，刻度差与发现时间差同时不超过
+  各自阈值（端点算命中），且当前没有生效的直接裁定；同桩号数值不是匹配
+  依据，候选变化不改变病害身份；
+- **组**：按生效「同一」边求连通分量，组内任一生效「不同」边即整组隔离；
+  组键是组内按 `(source, source_ref)` 逐项 Unicode 码点序最小的报件键，
+  不是流水号；隔离成员仍可复核，`defect-evidence` 给出一条只用当前在册
+  报件与生效「同一」边串起的路径；
+- **修订**：从空表修订 0 开始，每批成功后 +1；增量以批前/批后两张表的
+  行级差异下发，批内临时拆组/合组不外泄，无表变化也确认修订号；重试原
+  基准修订 + 完全相同内容只回放收据，同号不同内容 / 过期修订 / 输入错误
+  整批拒绝；某批只重算受影响的组，不扫全库、不预存可达矩阵或候选对。
+
+示例与规模：
+
+```bash
+# 一键示例：建包、建区、提交三批（演示隔离 -> 拆分 -> 无临时隔离地合回）
+python3 -I scripts/make_defect_example.py examples/defect
+
+# 验收测试（含独立逐批重建全图的参考程序）
+python3 -I tests/test_defects.py
+
+# 规模验收：局部重算范围、候选预筛读取量、全量/增量耗时（数据只落 data/）
+python3 -I scripts/defect_scale_check.py --workdir data/defect-scale
+```
+
 ## 验收测试
 
 测试含题目指定的断链轴（S/T 源段、U/V 目标段）、四态、别名、反查不改写、
@@ -207,3 +273,6 @@ python3 -I scripts/settlement_scale_check.py --workdir data/scale-settle
 `data/` 下的原始大数据、生成的库与规模报告均被 `.gitignore` 忽略；
 示例小包 `examples/demo_pkg`、`examples/settlement_pkg`、
 `examples/settlement` 随仓库提供（都很小，不含生成的大数据）。
+病害归并工作区的静态小示例 `examples/defect_pkg` 与
+`examples/defect_batches` 也随仓库提供；`scripts/make_defect_example.py`
+生成的工作区、库与报告落在 `examples/defect/` 或 `data/`，同样被忽略。

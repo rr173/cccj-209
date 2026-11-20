@@ -1,0 +1,32 @@
+{
+  "format": "chainage-defect-batch",
+  "batch_no": "demo-03",
+  "based_on_workspace": "REPLACE_WITH_defect-init_workspace_id",
+  "based_on_revision": 2,
+  "reports": [],
+  "void": [],
+  "adjudications": [
+    {
+      "a": {
+        "source": "巡查",
+        "source_ref": "B"
+      },
+      "b": {
+        "source": "巡查",
+        "source_ref": "C"
+      },
+      "decision": "same"
+    },
+    {
+      "a": {
+        "source": "巡查",
+        "source_ref": "A"
+      },
+      "b": {
+        "source": "巡查",
+        "source_ref": "C"
+      },
+      "decision": "clear"
+    }
+  ]
+}

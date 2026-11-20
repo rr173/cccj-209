@@ -134,3 +134,66 @@ class SettlementValidationError(ChainageError):
             summary += f"; ...（共 {len(self.issues)} 条）"
         super().__init__(f"巡检履约结算校验失败，{len(self.issues)} 条问题: "
                          f"{summary}")
+
+
+class DefectIssue:
+    """病害归并工作区的一条可定位问题（结构、引用或批文件冲突）。"""
+
+    __slots__ = ("location", "code", "message", "source", "source_ref",
+                 "other_source", "other_ref", "batch_no")
+
+    def __init__(self, location: str, code: str, message: str,
+                 source: Optional[str] = None,
+                 source_ref: Optional[str] = None,
+                 other_source: Optional[str] = None,
+                 other_ref: Optional[str] = None,
+                 batch_no: Optional[str] = None) -> None:
+        self.location = location
+        self.code = code
+        self.message = message
+        self.source = source
+        self.source_ref = source_ref
+        self.other_source = other_source
+        self.other_ref = other_ref
+        self.batch_no = batch_no
+
+    def __str__(self) -> str:  # pragma: no cover - 纯展示
+        parts = [self.location, self.code]
+        if self.source is not None:
+            parts.append(f"report={self.source}/{self.source_ref}")
+        if self.other_source is not None:
+            parts.append(f"other={self.other_source}/{self.other_ref}")
+        return f"{' '.join(parts)}: {self.message}"
+
+    def to_dict(self) -> dict:
+        out = {"location": self.location, "code": self.code,
+               "message": self.message}
+        if self.source is not None:
+            out["source"] = self.source
+            out["source_ref"] = self.source_ref
+        if self.other_source is not None:
+            out["other_source"] = self.other_source
+            out["other_ref"] = self.other_ref
+        if self.batch_no is not None:
+            out["batch_no"] = self.batch_no
+        return out
+
+
+class DefectValidationError(ChainageError):
+    """自带问题列表的病害工作区错误（结构/引用/批冲突），整批拒绝。"""
+
+    def __init__(self, issues: List[DefectIssue]):
+        self.issues: List[DefectIssue] = list(issues)
+        summary = "; ".join(str(i) for i in self.issues[:10])
+        if len(self.issues) > 10:
+            summary += f"; ...（共 {len(self.issues)} 条）"
+        super().__init__(f"病害工作区校验失败，{len(self.issues)} 条问题: "
+                         f"{summary}")
+
+
+class BatchRejected(DefectValidationError):
+    """批文件被拒绝（重号不同内容、过期基准修订、输入错误等）。"""
+
+    def __init__(self, issues: List[DefectIssue], code: str = "BATCH_REJECTED"):
+        self.code = code
+        super().__init__(issues)
