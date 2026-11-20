@@ -1,0 +1,19 @@
+{
+  "version": "demo-2026-11-20",
+  "axes": [
+    {
+      "axis_id": "A1",
+      "length": 100
+    },
+    {
+      "axis_id": "A2",
+      "length": 50
+    }
+  ],
+  "files": {
+    "manifest": "manifest.json",
+    "calibration": "calibration.jsonl",
+    "registration": "registration.jsonl"
+  },
+  "notes": "示例：A1 上旧线 S/T 在物理 4 断链复号；新线 U/V 反向接号"
+}

@@ -1,0 +1,3 @@
+{"reg_id": "R103", "source_system": "OLD", "target_system": "NEW", "from": 103, "to": 105}
+{"reg_id": "R104", "source_system": "OLD", "target_system": "NEW", "n": 104}
+{"reg_id": "RA2", "source_system": "OLD", "target_system": "NEW", "from": 101, "to": 103, "axis_id": "A2"}

@@ -1,0 +1,6 @@
+{"row_id": "S1", "system": "OLD", "axis_id": "A1", "segment": "S", "lo": 0, "hi": 4, "label_lo": 100, "direction": 1}
+{"row_id": "T1", "system": "OLD", "axis_id": "A1", "segment": "T", "lo": 4, "hi": 8, "label_lo": 104, "direction": -1}
+{"row_id": "U1", "system": "NEW", "axis_id": "A1", "segment": "U", "lo": 3, "hi": 4, "label_lo": 700, "direction": 1}
+{"row_id": "V1", "system": "NEW", "axis_id": "A1", "segment": "V", "lo": 4, "hi": 5, "label_lo": 900, "direction": -1}
+{"row_id": "S2", "system": "OLD", "axis_id": "A2", "segment": "S", "lo": 0, "hi": 6, "label_lo": 100, "direction": 1}
+{"row_id": "W1", "system": "NEW", "axis_id": "A2", "segment": "W", "lo": 0, "hi": 6, "label_lo": 300, "direction": -1}

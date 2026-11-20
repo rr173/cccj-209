@@ -1,0 +1,10 @@
+# 运行产物：原始大数据、生成的 SQLite 库、规模报告一律不入库
+data/
+*.db
+*.db.tmp
+*.db-wal
+*.db-shm
+__pycache__/
+*.pyc
+.pytest_cache/
+.coverage
