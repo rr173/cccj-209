@@ -1,0 +1,12 @@
+{
+  "version": "acq-demo-2026-11-21",
+  "files": {
+    "plan": "plan.jsonl",
+    "pulses": "pulses.jsonl",
+    "devices": "devices.json",
+    "volumes": [
+      "volumes/vol-a.jsonl"
+    ]
+  },
+  "notes": "题目现场核卷：模数 16、G=6；读数取 UTC 0 归 W-b；照片曝光 [-10/3,10] 三窗相交留 [8,9) 空档，均不可归档"
+}

@@ -1,0 +1,4 @@
+{"device": "survey-cam", "boot": "B-1", "seq": 0, "kind": "receipt", "count": 14, "pulse": "P-14"}
+{"device": "survey-cam", "boot": "B-1", "seq": 1, "kind": "photo", "count": 0, "round": "R-7", "channel": "still", "resource": "frame/0001.jpg", "exposure": 4}
+{"device": "survey-cam", "boot": "B-1", "seq": 2, "kind": "reading", "count": 1, "round": "R-7", "channel": "probe", "value": 42}
+{"device": "survey-cam", "boot": "B-1", "seq": 3, "kind": "receipt", "count": 4, "pulse": "P-4"}

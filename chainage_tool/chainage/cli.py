@@ -27,8 +27,17 @@ from typing import Any, List
 if __package__ in (None, ""):
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     from chainage import __version__
+    from chainage.acquisition import build_acquisition, parse_cli_id
+    from chainage.acquisition_query import (
+        acq_summary,
+        acq_trace,
+        acq_unattributed,
+        acq_windows,
+        open_acq,
+    )
     from chainage.build import build, validate_only
     from chainage.errors import (
+        AcquisitionValidationError,
         ChainageError,
         DefectValidationError,
         PackageValidationError,
@@ -45,8 +54,17 @@ if __package__ in (None, ""):
     from chainage import defects as defect_ws
 else:
     from . import __version__
+    from .acquisition import build_acquisition, parse_cli_id
+    from .acquisition_query import (
+        acq_summary,
+        acq_trace,
+        acq_unattributed,
+        acq_windows,
+        open_acq,
+    )
     from .build import build, validate_only
     from .errors import (
+        AcquisitionValidationError,
         ChainageError,
         DefectValidationError,
         PackageValidationError,
@@ -383,6 +401,107 @@ def _render_defect_scope(obj: dict) -> None:
           f"在册报件 {t['reports_present']}")
 
 
+# ---------------- 巡测车采集包 ----------------
+def _render_acq_summary(obj: dict) -> None:
+    print(f"采集包 {obj['package_version']}（状态 {obj['status']}，"
+          f"换算库交接版本 {obj['chainage_lib_version']}）")
+    s = obj["stats"]
+    print(f"  轮次 {s.get('rounds', '-')}，窗口 {s.get('windows', '-')}，"
+          f"分卷行 {s.get('volume_lines', '-')}，记录 {s.get('records', '-')}"
+          f"（重复行 {s.get('duplicate_lines', '-')}），块 {s.get('blocks', '-')}")
+    print(f"  已归属: 读数 {s.get('attributed_readings', 0)}，"
+          f"照片 {s.get('attributed_photos', 0)}；未归属 {s.get('unattributed', 0)}")
+    for cat in ("no_receipts", "start_unconstrained", "end_unconstrained",
+                "outside_windows", "partial_overlap"):
+        print(f"    {cat}: {s.get('unattributed_' + cat, 0)}")
+    print(f"  归因实际检查窗口行 {s.get('window_rows_examined', '-')}")
+
+
+def _render_acq_windows(obj: dict) -> None:
+    print(f"窗口 {obj['returned']}/{obj['total_windows']}"
+          f"（换算库交接版本 {obj['chainage_lib_version']}）"
+          + ("，已截断，用 --offset 翻页" if obj["truncated"] else ""))
+    for w in obj["windows"]:
+        iv = w["interval_utc"]
+        print(f"轮次 {w['round']} 窗口 {w['window']} "
+              f"[{iv['start']},{iv['end']}) 登记 {w['registration']} "
+              f"记录 {w['totals']['records']}")
+        if w["missing_expected_channels"]:
+            miss = ", ".join(f"{m['device']}/{m['channel']}"
+                             for m in w["missing_expected_channels"])
+            print(f"  缺证据期望通道: {miss}")
+        for c in w["channel_counts"]:
+            mark = "" if c["expected"] else "（非期望通道，不代替缺失）"
+            print(f"  通道 {c['device']}/{c['channel']} {c['kind']}"
+              f" x{c['n']}{mark}")
+        for r in w.get("records", []):
+            if r["kind"] == "reading":
+                print(f"    #{r['record_id']} 读数 {r['device']}/"
+                      f"{r['channel']} utc={r['utc']} 值 {r['value']}")
+            else:
+                ex = r["exposure_utc"]
+                print(f"    #{r['record_id']} 照片 {r['device']}/"
+                      f"{r['channel']} 曝光 [{ex['open']},{ex['close']}] "
+                      f"{r['resource']}")
+
+
+def _render_acq_unattributed(obj: dict) -> None:
+    print(f"未归属 {obj['returned']}/{obj['total_unattributed']}"
+          + ("，已截断，用 --offset 翻页" if obj["truncated"] else ""))
+    for r in obj["records"]:
+        head = (f"#{r['record_id']} {r['kind']} {r['device']}/"
+                f"{r.get('channel', '-')} 序号 {r['seq']} "
+                f"计数 {r['raw_count']} -> {r['category']}")
+        print(head)
+        if r["category"] == "partial_overlap":
+            for o in r["overlaps"]:
+                ov = o["overlap"]
+                print(f"    相交窗口 {o['window']} "
+                      f"[{ov['lo']},{ov['hi']}]")
+            for g in r["gaps"]:
+                print(f"    未覆盖子区间 [{g['lo']},{g['hi']})")
+
+
+def _render_acq_trace(obj: dict) -> None:
+    r = obj["record"]
+    print(f"记录 #{r['record_id']} {r['kind']} 设备 {r['device']} "
+          f"启动号 {r['boot']} 序号 {r['seq']} 原始计数 {r['raw_count']}")
+    ev = ", ".join(f"{e['volume']}:{e['line']}" for e in obj["evidence"])
+    print(f"  卷行: {ev}")
+    b = obj["block"]
+    print(f"  展开块 #{b['block_id']} 序号 [{b['seq_first']},"
+          f"{b['seq_last']}] 展开坐标 {b['expanded']}"
+          f"（块内回执 {b['n_receipts']}）")
+    clock = obj.get("clock", {})
+    if clock.get("role") == "receipt":
+        print(f"  本记录是回执: 脉冲 {clock['pulse']} UTC {clock['utc']}")
+    elif clock:
+        print(f"  对齐状态: {clock['status']}")
+        if "utc" in clock:
+            print(f"  UTC {clock['utc']}")
+        if "exposure_utc" in clock:
+            ex = clock["exposure_utc"]
+            print(f"  曝光 [{ex['open']},{ex['close']}]")
+        for rc in clock.get("receipts", []):
+            print(f"  回执#{rc['receipt_record_id']}（{','.join(rc['roles'])}）"
+                  f" 脉冲 {rc['pulse']} UTC {rc['pulse_utc']} "
+                  f"展开 {rc['expanded']}")
+    if "attribution" in obj:
+        a = obj["attribution"]
+        iv = a["interval_utc"]
+        print(f"  归属: 轮次 {a['round']} 窗口 {a['window']} "
+              f"[{iv['start']},{iv['end']})")
+    elif "unattributed" in obj:
+        u = obj["unattributed"]
+        print(f"  未归属: {u['category']}")
+        for o in u.get("overlaps", []):
+            ov = o["overlap"]
+            print(f"    相交窗口 {o['window']} [{ov['lo']},{ov['hi']}]")
+        for g in u.get("gaps", []):
+            print(f"    未覆盖子区间 [{g['lo']},{g['hi']})")
+
+
+
 def _settle_call(args) -> dict:
     return run_settlement(args.db_path, args.obligations, args.trip_log,
                           cutoff=args.cutoff)
@@ -525,10 +644,51 @@ def _build_parser() -> argparse.ArgumentParser:
     p_dscope.add_argument("workspace_dir")
     p_dscope.add_argument("--batch")
 
+    # ---------------- 巡测车采集包装配 ----------------
+    p_abuild = sub.add_parser(
+        "acq-build", help="装配巡测车采集包（计划+脉冲+设备+分卷 -> SQLite，"
+                          "已存在则拒绝，不覆盖上一份交付）")
+    p_abuild.add_argument("package_dir", help="采集交接包目录（含 manifest.json）")
+    p_abuild.add_argument("chainage_db", help="既有 ready 换算库")
+    p_abuild.add_argument("out_db", help="输出采集包路径")
+
+    p_awin = sub.add_parser(
+        "acq-windows", help="按轮次读窗口采样表（空窗口也列出并标缺证据通道）")
+    p_awin.add_argument("db_path")
+    p_awin.add_argument("--round", dest="round_id",
+                        help="轮次标识（JSON 字面量或字符串）")
+    p_awin.add_argument("--window", dest="window_id",
+                        help="窗口号（JSON 字面量或字符串）")
+    p_awin.add_argument("--limit", type=int, default=200)
+    p_awin.add_argument("--offset", type=int, default=0)
+    p_awin.add_argument("--no-records", action="store_true",
+                        help="只出计数与缺证据通道，不列记录明细")
+
+    p_aun = sub.add_parser(
+        "acq-unattributed", help="单列不能归属的原始记录")
+    p_aun.add_argument("db_path")
+    p_aun.add_argument("--round", dest="round_id")
+    p_aun.add_argument("--category",
+                       choices=("no_receipts", "start_unconstrained",
+                                "end_unconstrained", "outside_windows",
+                                "partial_overlap"))
+    p_aun.add_argument("--kind", choices=("reading", "photo"))
+    p_aun.add_argument("--limit", type=int, default=200)
+    p_aun.add_argument("--offset", type=int, default=0)
+
+    p_atr = sub.add_parser(
+        "acq-trace", help="回看一条采样/未归属记录（卷行、展开块、所用回执）")
+    p_atr.add_argument("db_path")
+    p_atr.add_argument("record_id", type=int)
+
+    p_asum = sub.add_parser(
+        "acq-summary", help="采集包摘要（状态、交接版本、统计、输入指纹）")
+    p_asum.add_argument("db_path")
+
     for p in (p_val, p_build, p_fwd, p_rev, p_regs, p_cal, p_plan,
               p_settle, p_diff, p_expl, p_dinit, p_dbatch, p_dfull, p_dinc,
               p_dgroups, p_dgroup, p_devid, p_dcand, p_dreps, p_dadjs,
-              p_dscope):
+              p_dscope, p_abuild, p_awin, p_aun, p_atr, p_asum):
         p.add_argument("--text", action="store_true", help="紧凑文本输出（默认 JSON）")
     return parser
 
@@ -663,6 +823,55 @@ def main(argv: List[str] = None) -> int:
             obj = defect_ws.last_batch_scope(args.workspace_dir, args.batch)
             return _emit(obj, args.text, _render_defect_scope)
 
+        if args.cmd == "acq-build":
+            stats = build_acquisition(
+                args.package_dir, args.chainage_db, args.out_db)
+            return _emit(stats.to_dict(), args.text,
+                         lambda o: print("采集包构建完成: " +
+                                         json.dumps(o, ensure_ascii=False)))
+
+        if args.cmd == "acq-windows":
+            with open_acq(args.db_path) as conn:
+                obj = acq_windows(
+                    conn,
+                    round_c=parse_cli_id(args.round_id)
+                    if args.round_id is not None else None,
+                    window_c=parse_cli_id(args.window_id)
+                    if args.window_id is not None else None,
+                    limit=args.limit, offset=args.offset,
+                    with_records=not args.no_records)
+            return _emit(obj, args.text, _render_acq_windows)
+
+        if args.cmd == "acq-unattributed":
+            with open_acq(args.db_path) as conn:
+                obj = acq_unattributed(
+                    conn,
+                    round_c=parse_cli_id(args.round_id)
+                    if args.round_id is not None else None,
+                    category=args.category, kind=args.kind,
+                    limit=args.limit, offset=args.offset)
+            return _emit(obj, args.text, _render_acq_unattributed)
+
+        if args.cmd == "acq-trace":
+            with open_acq(args.db_path) as conn:
+                obj = acq_trace(conn, args.record_id)
+            if obj is None:
+                raise ChainageError(f"采集包内没有记录 #{args.record_id}")
+            return _emit(obj, args.text, _render_acq_trace)
+
+        if args.cmd == "acq-summary":
+            with open_acq(args.db_path) as conn:
+                obj = acq_summary(conn)
+            return _emit(obj, args.text, _render_acq_summary)
+
+    except AcquisitionValidationError as exc:
+        payload = {
+            "error": "ACQUISITION_VALIDATION_FAILED",
+            "validation_errors": [e.to_dict() for e in exc.errors],
+        }
+        json.dump(payload, sys.stdout, ensure_ascii=False, indent=2)
+        sys.stdout.write("\n")
+        return 2
     except DefectValidationError as exc:
         payload = {
             "error": "DEFECT_VALIDATION_FAILED",

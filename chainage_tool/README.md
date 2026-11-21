@@ -32,6 +32,8 @@ chainage/            产品代码
   settlement_input.py                  义务表/巡检簿解析、校验、暂存
   settlement.py                        巡检履约结算（可见版本、片段定位、分界扫描）
   defects.py                           病害报件归并工作区（批、组、候选、增量）
+  acquisition.py                       巡测车采集包装配（拼接、展开、对齐、归属）
+  acquisition_query.py                 采集包查询（窗口采样表、未归属、回看）
   cli.py                               命令行入口
 tests/               验收测试 + 独立逐刻度参考程序
   reference_oracle.py                  桩号换算的逐刻度参考程序
@@ -39,12 +41,16 @@ tests/               验收测试 + 独立逐刻度参考程序
   settlement_fixture.py                结算测试夹具
   test_defects.py                      病害归并验收测试
   defect_oracle.py                     病害归并的独立逐批重建参考程序
+  test_acquisition.py                  采集包装配验收测试
+  acquisition_oracle.py                采集归属的独立精确有理数参考程序
 scripts/             规模验收与示例生成
 docs/FORMAT.md       交接包、库格式与结算输入/输出说明
 docs/DEFECTS.md      病害归并工作区：批格式、候选、组、修订与增量
+docs/ACQUISITION.md  巡测车采集包：输入格式、装配规则、查询与验收
 examples/demo_pkg/   文档化示例交接包
 examples/settlement_pkg/ , examples/settlement/
                      文档化结算示例（义务表 + 巡检簿）
+examples/acquisition/                  文档化采集交接包（题目现场核卷）
 data/                运行产物（Git 忽略）
 ```
 
@@ -207,6 +213,58 @@ python3 -I tests/test_defects.py
 python3 -I scripts/defect_scale_check.py --workdir data/defect-scale
 ```
 
+## 巡测车采集包装配（离线）
+
+在既有 ready 换算库之上，把巡测车交回的计划表（UTC 半开窗口）、参考
+脉冲表、设备配置和各设备 JSONL 分卷装配成一份可交付质检的 SQLite
+采集包：每处计划窗口的已归属读数/照片索引与通道计数、单列不能归属
+的原始记录、任一记录到卷行/展开块/所用回执的回看。不读取照片二进制，
+不从采样数据推测行驶路线（登记 ID 只核实存在并引用交接版本）。
+
+```bash
+# 0) 准备 ready 换算库与示例采集交接包（题目"现场核一卷"那组数字）
+python3 -m chainage build examples/demo_pkg data/demo.db
+python3 -I scripts/make_acquisition_example.py examples/acquisition
+
+# 1) 装配（输出已存在则拒绝，不覆盖上一份交付）
+python3 -m chainage acq-build examples/acquisition data/demo.db data/acq.db
+
+# 2) 按轮次读窗口采样表（空窗口也列出，缺证据期望通道逐一标出）
+python3 -m chainage acq-windows data/acq.db --round R-7 --text
+python3 -m chainage acq-windows data/acq.db --round R-7 --window W-b
+
+# 3) 单列不能归属的原始记录（缺时钟/完全窗外/局部交叠互不混淆）
+python3 -m chainage acq-unattributed data/acq.db --text
+python3 -m chainage acq-unattributed data/acq.db --category partial_overlap
+
+# 4) 回看一条记录：原始计数、卷行、展开块、所用回执与其参考时刻
+python3 -m chainage acq-trace data/acq.db 2 --text
+python3 -m chainage acq-summary data/acq.db --text
+```
+
+要点（完整交付说明见 `docs/ACQUISITION.md`）：
+
+- 按 `(设备, 启动号, 序号)` 拼接：业务字段一致的重复只算一次（证据
+  全保留）；同键冲突、未知引用、坏字段、重复窗口键、非法窗口与不可能
+  的时钟记录定位输入并拒绝交付，不按"最后收到"覆盖；
+- 序号断开切新块，块内相邻序号取 `[0,M)` 非负模差（>`G` 是结构错误），
+  累计成展开坐标（十进制文本，超 int64 不回卷）；块内回执间精确有理数
+  线性插值，不借别的块/启动的时钟；回执不足是质量结果而非输入错误；
+- 读数按所落窗口归档；照片只有整段曝光落在一窗内才归档（闭快门触右端
+  算在内），否则给出全部正长度相交窗口的精确交叠与未覆盖子区间，
+  "离开窗口"与"跨多窗"分别标记，不选重叠最长的一扇、不重复计；
+- 归属判定用精确值比较（大 UTC 下亚纳秒差不失真），不先四舍五入再
+  选窗口；分卷处理顺序不影响归属、诊断类别与窗口数量；
+- 规模验收：100 万采集行 + 10 万同轮次窗口，构建峰值 RSS ≤ 256 MiB，
+  归因实际检查窗口行数与 记录数×窗口数 解耦（见
+  `scripts/acquisition_scale_check.py` 与 `data/acq-scale/scale_report.json`）。
+
+```bash
+python3 -I tests/test_acquisition.py
+python3 -I scripts/acquisition_scale_check.py --workdir data/acq-scale
+```
+
+
 ## 验收测试
 
 测试含题目指定的断链轴（S/T 源段、U/V 目标段）、四态、别名、反查不改写、
@@ -254,6 +312,20 @@ python3 -I scripts/settlement_scale_check.py --workdir data/scale-settle
 - 组 2：多轴、多义务、密集重复上报——展示工作量随相关片段与状态分界增长，
   并实际报告 `tracemalloc` 峰值与进程峰值 RSS。
 
+采集包装配规模验收（详见 `docs/ACQUISITION.md` 第 9/10 节）：
+
+```bash
+python3 -I scripts/acquisition_scale_check.py --workdir data/acq-scale
+```
+
+- 运行时生成 100 万采集行（含重复行）+ 10 万个同轮次窗口：大量同一时段
+  的曝光、很稠密的小窗口、少量横跨许多窗口的长曝光，以及展开坐标超过
+  int64 的设备（验证十进制文本存储不回卷）；
+- 子进程构建并量测峰值 RSS（上限 256 MiB）；报告归因实际检查的窗口行数
+  `window_rows_examined` 并与 记录数×窗口数 对照，证明不做候选扫描；
+- 抽样用逐窗暴力求交 + 精确有理数独立复核归属与交叠/空档明细；
+- 同一批分卷按相反顺序再建一次，全部结果表逐行一致（顺序无关性）。
+
 ## 工作内存边界
 
 - 标定工作集按 `(体系, 轴)` 驻留，规模随**标定行数**线性增长（每行是很小的
@@ -267,6 +339,10 @@ python3 -I scripts/settlement_scale_check.py --workdir data/scale-settle
   SQLite 内完成"取最后一条"，逐趟解析后直接写 `resolved_*` 索引表；
   每项义务按 `(轴, 车道, 时刻)` 索引只取相关趟次，不对义务全扫巡检簿，
   也不为输出区段复制整套班组证据。分界扫描只随相关片段与状态分界增长。
+- 采集包装配同样落盘：分卷逐行入暂存表，拼接/展开/对齐/归因走游标分批
+  写入；进程内只常驻单块回执列表与单轮次窗口（紧凑 int64 数组），
+  不积压全包记录、所有曝光或所有相交明细；展开坐标以十进制文本存储，
+  超过 int64 也不回卷。
 
 ## 不入库的产物
 
@@ -276,3 +352,7 @@ python3 -I scripts/settlement_scale_check.py --workdir data/scale-settle
 病害归并工作区的静态小示例 `examples/defect_pkg` 与
 `examples/defect_batches` 也随仓库提供；`scripts/make_defect_example.py`
 生成的工作区、库与报告落在 `examples/defect/` 或 `data/`，同样被忽略。
+采集交接包小示例 `examples/acquisition` 由
+`scripts/make_acquisition_example.py` 生成并随仓库提交（只有题目
+"现场核一卷"那组数字）；规模验收生成的大分卷、采集包与报告只落
+`data/acq-scale/`，不进 Git。

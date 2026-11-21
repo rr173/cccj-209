@@ -1,0 +1,19 @@
+{
+  "devices": [
+    {
+      "device": "survey-cam",
+      "modulus": 16,
+      "max_advance": 6,
+      "channels": [
+        [
+          "still",
+          "photo"
+        ],
+        [
+          "probe",
+          "scalar"
+        ]
+      ]
+    }
+  ]
+}

@@ -29,8 +29,8 @@ class PackageValidationError(ChainageError):
         super().__init__(f"交接包校验失败，{len(self.errors)} 条错误: {summary}")
 
 
-class ValidationError:
-    """单条校验错误（值对象，可序列化）。"""
+class ValidationError(Exception):
+    """单条校验错误（值对象，可序列化；也可在解析期被抛出做流控）。"""
 
     __slots__ = ("location", "code", "message", "row_id")
 
@@ -197,3 +197,18 @@ class BatchRejected(DefectValidationError):
     def __init__(self, issues: List[DefectIssue], code: str = "BATCH_REJECTED"):
         self.code = code
         super().__init__(issues)
+
+
+class AcquisitionValidationError(ChainageError):
+    """采集交接包校验/装配失败：聚合全部定位错误，不交付任何部分结果。
+
+    错误条目复用 :class:`ValidationError`（location 定位到
+    ``文件:行号`` 或 ``卷名:行号`` 列表，code 为稳定机器码）。
+    """
+
+    def __init__(self, errors: List[ValidationError]):
+        self.errors: List[ValidationError] = list(errors)
+        summary = "; ".join(str(e) for e in self.errors[:10])
+        if len(self.errors) > 10:
+            summary += f"; ...（共 {len(self.errors)} 条）"
+        super().__init__(f"采集包校验失败，{len(self.errors)} 条错误: {summary}")

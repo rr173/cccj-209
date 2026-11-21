@@ -1,0 +1,3 @@
+{"round": "R-7", "window": "W-a", "start_utc": -10, "end_utc": 0, "registration": "R103", "expected_channels": [["survey-cam", "still"], ["survey-cam", "probe"]]}
+{"round": "R-7", "window": "W-b", "start_utc": 0, "end_utc": 8, "registration": "R104", "expected_channels": [["survey-cam", "still"], ["survey-cam", "probe"]]}
+{"round": "R-7", "window": "W-c", "start_utc": 9, "end_utc": 10, "registration": "RA2", "expected_channels": [["survey-cam", "still"], ["survey-cam", "probe"]]}
